@@ -1,9 +1,24 @@
 import logging
-import json
+import re
 from ml.kg_schemas import ExtractionResult
 from ml.kg_utils import get_connector
 
 logger = logging.getLogger("kg_ingestion")
+
+ALLOWED_REL_TYPES = frozenset({"BELONGS_TO", "PRODUCED_BY", "SERVES"})
+_REL_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def safe_rel_type(rel_type):
+    """Return a backtick-escaped relationship type, or raise ValueError.
+
+    Relationship types cannot be parameterized in Cypher, so the value is
+    checked against a strict allowlist and regex before interpolation.
+    """
+    if (not isinstance(rel_type, str) or not _REL_TYPE_RE.fullmatch(rel_type)
+            or rel_type not in ALLOWED_REL_TYPES):
+        raise ValueError(f"Invalid relationship type: {rel_type!r}")
+    return "`" + rel_type.replace("`", "``") + "`"
 
 def ingest_graph(extraction: ExtractionResult, model_version: str = "unknown"):
     """
@@ -73,9 +88,14 @@ def ingest_graph(extraction: ExtractionResult, model_version: str = "unknown"):
     logger.info("Ingesting relationships...")
     
     for rel in extraction.relationships:
+        try:
+            rel_type = safe_rel_type(rel.type)
+        except ValueError:
+            logger.warning("Skipping relationship with invalid type: %r", rel.type)
+            continue
         query = f"""
         MATCH (s {{id: $source_id}}), (t {{id: $target_id}})
-        MERGE (s)-[r:{rel.type}]->(t)
+        MERGE (s)-[r:{rel_type}]->(t)
         SET r += $props,
             r.ingested_at = datetime()
         """

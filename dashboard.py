@@ -12,6 +12,37 @@ from langchain_core.messages import HumanMessage, AIMessage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("airkube.dashboard")
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _neo4j_reachable() -> bool:
+    """Actually run RETURN 1 against Neo4j."""
+    try:
+        from ml.kg_utils import get_connector
+        c = get_connector()
+        if not c.driver:
+            return False
+        try:
+            c.driver.verify_connectivity()
+            return True
+        finally:
+            c.close()
+    except Exception:
+        logger.exception("Neo4j connectivity check failed")
+        return False
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _openrouter_key_valid(key: str) -> bool:
+    """Validate the OpenRouter key against the auth endpoint."""
+    try:
+        import requests
+        r = requests.get("https://openrouter.ai/api/v1/auth/key",
+                         headers={"Authorization": f"Bearer {key}"}, timeout=5)
+        return r.status_code == 200
+    except Exception:
+        logger.exception("OpenRouter key check failed")
+        return False
+
 # Cap how many recent chat messages are sent to the LLM on each turn. The
 # system prompt stays fixed/unbounded-free; only the conversational history
 # is sliding-window truncated so token cost/context usage don't grow
@@ -202,13 +233,15 @@ with st.sidebar:
 
     openrouter_ok = bool(os.getenv("OPENROUTER_API_KEY"))
     neo4j_uri = os.getenv("NEO4J_URI", "")
-    neo4j_ok = "databases.neo4j.io" in neo4j_uri or ("localhost" in neo4j_uri)
+    neo4j_ok = _neo4j_reachable() if neo4j_uri else False
+    if openrouter_ok:
+        openrouter_ok = _openrouter_key_valid(os.getenv("OPENROUTER_API_KEY", ""))
 
     st.markdown(
-        f"{'🟢' if openrouter_ok else '🔴'} OpenRouter {'connected' if openrouter_ok else 'not configured'}"
+        f"{'🟢' if openrouter_ok else '🔴'} OpenRouter {'connected' if openrouter_ok else 'unavailable'}"
     )
     st.markdown(
-        f"{'🟢' if neo4j_ok else '🔴'} Neo4j {'Aura' if 'databases.neo4j.io' in neo4j_uri else 'local' if neo4j_ok else 'not configured'}"
+        f"{'🟢' if neo4j_ok else '🔴'} Neo4j {'connected' if neo4j_ok else 'unreachable' if neo4j_uri else 'not configured'}"
     )
     news_ok = bool(os.getenv("NEWS_API_KEY"))
     st.markdown(f"{'🟢' if news_ok else '🟡'} NewsAPI {'connected' if news_ok else 'not set'}")
@@ -298,7 +331,14 @@ if view == "💬  Chat":
                 # per-turn token cost/context usage bounded on long sessions.
                 recent_messages = st.session_state.messages[-MAX_HISTORY_MESSAGES:]
                 with tracer.trace("dashboard.agent_invoke", service="airkube-dashboard"):
-                    final_state = app.invoke({"messages": recent_messages})
+                    try:
+                        final_state = app.invoke({"messages": recent_messages})
+                    except Exception:
+                        logger.exception("Agent invocation failed")
+                        final_state = None
+                if final_state is None:
+                    st.error("Sorry, something went wrong answering that. Please try again shortly.", icon="❌")
+                    st.stop()
                 ai_msgs = [
                     m for m in final_state["messages"]
                     if isinstance(m, AIMessage) and m.content
@@ -385,4 +425,5 @@ Deployed to cluster 'prod-us-west' with 5 replicas."""
                             st.markdown(f"**{key.replace('_', ' ').title()}**")
                             st.markdown(f"> {val}")
             except Exception as e:
-                st.error(f"Extraction failed: {e}", icon="❌")
+                logger.exception("Extraction failed")
+                st.error("Extraction failed. Please check your input and try again.", icon="❌")
