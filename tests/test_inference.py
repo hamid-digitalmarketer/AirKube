@@ -4,9 +4,12 @@ import os
 # Add root to path so ml.model can be imported
 sys.path.append(os.getcwd())
 
-from fastapi.testclient import TestClient
-from ml.inference import app
+import importlib
 
+import ml.inference as inference_module
+from fastapi.testclient import TestClient
+
+app = inference_module.app
 client = TestClient(app)
 
 def test_health():
@@ -59,6 +62,65 @@ def test_predict_batch():
     results = response.json()["results"]
     assert len(results) == 2
     assert results[0]["model_version"] == "v2.1-iris"
+
+def test_require_api_key_uses_constant_time_comparison(monkeypatch):
+    """
+    Regression test for #15: require_api_key must compare keys with
+    hmac.compare_digest (constant-time), not `!=`, to avoid a timing
+    side-channel. We can't reliably assert on timing in a unit test, so
+    instead we assert on behavior that only compare_digest-style comparison
+    guarantees: correctness is unaffected, and a None-vs-str call never
+    raises TypeError (hmac.compare_digest requires matching types, so the
+    implementation must coerce `provided_key` before calling it).
+    """
+    monkeypatch.setattr(inference_module, "API_KEY", "super-secret-key")
+
+    # Correct key -> allowed through.
+    resp = client.get("/health")  # /health has no auth; sanity check app works
+    assert resp.status_code == 200
+
+    resp_ok = client.post(
+        "/predict",
+        json={"data": [5.1, 3.5, 1.4, 0.2]},
+        headers={"X-API-Key": "super-secret-key"},
+    )
+    assert resp_ok.status_code == 200
+
+    # Wrong key -> rejected, and no header at all -> rejected (None case).
+    resp_wrong = client.post(
+        "/predict",
+        json={"data": [5.1, 3.5, 1.4, 0.2]},
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert resp_wrong.status_code == 401
+
+    resp_missing = client.post("/predict", json={"data": [5.1, 3.5, 1.4, 0.2]})
+    assert resp_missing.status_code == 401
+
+    # Partial-prefix-correct guesses must be rejected just like a
+    # completely-wrong guess (this is what `!=` also gets right
+    # functionally; the real bug was about *timing*, not correctness, but
+    # this still guards against a naive "startswith" style regression).
+    resp_prefix = client.post(
+        "/predict",
+        json={"data": [5.1, 3.5, 1.4, 0.2]},
+        headers={"X-API-Key": "super-secret-k"},
+    )
+    assert resp_prefix.status_code == 401
+
+
+def test_require_api_key_source_uses_compare_digest():
+    """
+    Belt-and-suspenders check that the fix actually landed: assert the
+    source of require_api_key calls hmac.compare_digest rather than `!=`
+    for the secret comparison.
+    """
+    import inspect
+
+    source = inspect.getsource(inference_module.require_api_key)
+    assert "hmac.compare_digest" in source
+    assert "!=" not in source
+
 
 if __name__ == "__main__":
     # Test runner

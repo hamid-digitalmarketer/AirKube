@@ -166,7 +166,38 @@ def check_system_health():
     except Exception:
         health_status.append("[ERR] Knowledge Graph Connector: Failed")
 
-    # 3. Check Airflow (Simulated)
-    health_status.append("[OK] Airflow: Scheduler Running (Simulated)")
-    
+    # 3. Check Airflow
+    health_status.append(_check_airflow_health())
+
     return " | ".join(health_status)
+
+
+def _check_airflow_health() -> str:
+    """
+    Checks Airflow's own REST API health endpoint (GET /api/v1/health) using
+    the same env vars and honest-failure pattern as _trigger_airflow_dag: it
+    never reports Airflow as healthy unless the API actually confirmed it.
+    """
+    base_url = os.getenv("AIRFLOW_BASE_URL")
+    username = os.getenv("AIRFLOW_USERNAME")
+    password = os.getenv("AIRFLOW_PASSWORD")
+
+    if not base_url:
+        return "[WARN] Airflow: not configured (missing AIRFLOW_BASE_URL)"
+
+    url = f"{base_url.rstrip('/')}/api/v1/health"
+    try:
+        auth = (username, password) if username and password else None
+        resp = requests.get(url, auth=auth, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        scheduler_status = (
+            data.get("scheduler", {}).get("status", "unknown")
+            if isinstance(data, dict)
+            else "unknown"
+        )
+        if scheduler_status.lower() == "healthy":
+            return f"[OK] Airflow: Scheduler {scheduler_status}"
+        return f"[WARN] Airflow: Scheduler status is '{scheduler_status}'"
+    except Exception as e:
+        return f"[ERR] Airflow: Unreachable ({str(e)})"

@@ -1,3 +1,4 @@
+import hmac
 import os
 import time
 import logging
@@ -55,7 +56,7 @@ def require_api_key(provided_key: Optional[str] = Security(_api_key_header)) -> 
     """
     if API_KEY is None:
         return
-    if provided_key != API_KEY:
+    if not hmac.compare_digest(provided_key or "", API_KEY):
         raise HTTPException(status_code=401, detail="Missing or invalid API key")
 
 
