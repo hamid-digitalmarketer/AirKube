@@ -128,3 +128,82 @@ def ingest_graph(extraction: ExtractionResult, model_version: str = "unknown"):
     logger.info("Ingestion complete.")
     connector.close()
 
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(*parts: str) -> str:
+    """Build a stable, lowercase, underscore-separated id from parts."""
+    joined = "_".join(str(p) for p in parts if p)
+    return _SLUG_RE.sub("_", joined.lower()).strip("_")
+
+
+def record_deployment(model_name: str, model_version: str, cluster: str,
+                       image: str, replicas: int):
+    """
+    Create/update a Deployment node and its (:Deployment)-[:SERVES]->(:Model)
+    relationship for an already-ingested Model, using a fixed, parameterized
+    Cypher template (no f-string interpolation of user input, matching the
+    pattern issue #5 fixed).
+
+    This is the only sanctioned write path the agent's `record_deployment`
+    tool (agent/tools.py, #13) is allowed to call - it reuses the same
+    validated helper `dags/kg_pipeline.py` trusts for ingestion, rather than
+    letting the agent build or run arbitrary Cypher.
+
+    Returns a dict: {"status": "ok", "deployment_id": ...} on success, or
+    {"status": "error", "message": ...} if the target Model doesn't exist
+    in the graph yet.
+    """
+    connector = get_connector()
+    try:
+        deployment_id = _slugify(model_name, model_version, cluster)
+
+        query = """
+        MATCH (m:Model {name: $model_name, version: $model_version})
+        MERGE (d:Deployment {id: $deployment_id})
+        SET d.name = $deployment_name,
+            d.cluster = $cluster,
+            d.image = $image,
+            d.replicas = $replicas,
+            d.last_updated = datetime()
+        MERGE (d)-[r:SERVES]->(m)
+        SET r.ingested_at = datetime()
+        RETURN d.id AS deployment_id, m.id AS model_id
+        """
+        params = {
+            "model_name": model_name,
+            "model_version": model_version,
+            "deployment_id": deployment_id,
+            "deployment_name": f"{model_name}-{model_version}-{cluster}",
+            "cluster": cluster,
+            "image": image,
+            "replicas": replicas,
+        }
+        records = connector.run_write_query(query, params)
+
+        if not records:
+            logger.warning(
+                "record_deployment: no Model found for name=%r version=%r",
+                model_name, model_version,
+            )
+            return {
+                "status": "error",
+                "message": (
+                    f"No Model node found with name={model_name!r} "
+                    f"version={model_version!r}. Deployment was not recorded."
+                ),
+            }
+
+        logger.info(
+            "Recorded deployment %r serving model %r",
+            deployment_id, records[0].get("model_id"),
+        )
+        return {
+            "status": "ok",
+            "deployment_id": deployment_id,
+            "model_id": records[0].get("model_id"),
+        }
+    finally:
+        connector.close()
+

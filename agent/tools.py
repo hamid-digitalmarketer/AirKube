@@ -1,5 +1,6 @@
 from langchain.tools import tool
 from ml.kg_utils import get_connector
+from ml.kg_ingestion import record_deployment as _record_deployment
 import logging
 import os
 import requests
@@ -134,6 +135,42 @@ def query_knowledge_graph(query: str):
         return f"Error querying KG: {str(e)}"
     finally:
         connector.close()
+
+@tool
+def record_deployment(model_name: str, model_version: str, cluster: str,
+                       image: str, replicas: int = 1):
+    """
+    Records that a model has been deployed, creating/updating a Deployment
+    node and its (:Deployment)-[:SERVES]->(:Model) relationship in the
+    Knowledge Graph.
+
+    This is the ONLY sanctioned write path for the agent - it reuses the
+    validated, parameterized write helper in `ml/kg_ingestion.py` (the same
+    one the kg_pipeline Airflow DAG trusts for ingestion) instead of
+    building or running arbitrary Cypher. `query_knowledge_graph` remains
+    strictly read-only.
+
+    Args:
+        model_name (str): Name of the already-ingested Model (must already
+            exist in the KG, e.g. from a prior training run).
+        model_version (str): Version of that Model.
+        cluster (str): Target cluster/environment, e.g. 'prod' or 'staging'.
+        image (str): Container image reference being deployed.
+        replicas (int): Number of replicas. Defaults to 1.
+
+    Returns:
+        str: Confirmation naming the created/updated Deployment node, or an
+        explicit error if no matching Model exists in the graph yet.
+    """
+    result = _record_deployment(model_name, model_version, cluster, image, replicas)
+    if result["status"] == "ok":
+        return (
+            f"Recorded deployment '{result['deployment_id']}': "
+            f"model '{model_name}' v{model_version} -> cluster '{cluster}' "
+            f"(image={image}, replicas={replicas})."
+        )
+    return result["message"]
+
 
 @tool
 def check_system_health():

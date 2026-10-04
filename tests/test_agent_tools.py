@@ -79,3 +79,37 @@ def test_check_system_health_never_fabricates_simulated_ok(monkeypatch):
 
     result = tools.check_system_health.invoke({})
     assert "Simulated" not in result
+
+
+# ── #13: record_deployment tool ─────────────────────────────────────────────
+
+def test_record_deployment_tool_success(monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "_record_deployment",
+        lambda *a, **k: {"status": "ok", "deployment_id": "resnet50_v2_prod", "model_id": "resnet50_v2"},
+    )
+    result = tools.record_deployment.invoke({
+        "model_name": "resnet50",
+        "model_version": "v2",
+        "cluster": "prod",
+        "image": "registry/resnet50:v2",
+        "replicas": 3,
+    })
+    assert "resnet50_v2_prod" in result
+    assert "prod" in result
+
+
+def test_record_deployment_tool_missing_model(monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "_record_deployment",
+        lambda *a, **k: {"status": "error", "message": "No Model node found with name='ghost' version='v1'."},
+    )
+    result = tools.record_deployment.invoke({
+        "model_name": "ghost",
+        "model_version": "v1",
+        "cluster": "prod",
+        "image": "registry/ghost:v1",
+    })
+    assert "No Model node found" in result

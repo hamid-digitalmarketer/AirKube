@@ -63,3 +63,42 @@ def test_rel_type_labels_cover_all_allowed_types():
     """Every allowlisted relationship type must have a label mapping, or
     ingestion would silently skip valid relationships."""
     assert kg_ingestion.ALLOWED_REL_TYPES <= set(kg_ingestion.REL_TYPE_LABELS.keys())
+
+
+# ── #13: record_deployment write-path helper ────────────────────────────────
+
+def test_record_deployment_success(monkeypatch):
+    conn = MagicMock()
+    conn.run_write_query.return_value = [{"deployment_id": "resnet50_v2_prod", "model_id": "resnet50_v2"}]
+    monkeypatch.setattr(kg_ingestion, "get_connector", lambda: conn)
+
+    result = kg_ingestion.record_deployment("resnet50", "v2", "prod", "registry/resnet50:v2", 3)
+
+    assert result == {"status": "ok", "deployment_id": "resnet50_v2_prod", "model_id": "resnet50_v2"}
+    query, params = conn.run_write_query.call_args.args
+    assert "MATCH (m:Model {name: $model_name, version: $model_version})" in query
+    assert "MERGE (d:Deployment {id: $deployment_id})" in query
+    assert "MERGE (d)-[r:SERVES]->(m)" in query
+    assert params["model_name"] == "resnet50"
+    assert params["model_version"] == "v2"
+    assert params["cluster"] == "prod"
+    assert params["image"] == "registry/resnet50:v2"
+    assert params["replicas"] == 3
+    conn.close.assert_called_once()
+
+
+def test_record_deployment_missing_model_returns_error(monkeypatch):
+    conn = MagicMock()
+    conn.run_write_query.return_value = []  # MATCH found no Model
+    monkeypatch.setattr(kg_ingestion, "get_connector", lambda: conn)
+
+    result = kg_ingestion.record_deployment("ghost", "v1", "prod", "registry/ghost:v1", 1)
+
+    assert result["status"] == "error"
+    assert "ghost" in result["message"]
+    conn.close.assert_called_once()
+
+
+def test_slugify_produces_stable_lowercase_id():
+    assert kg_ingestion._slugify("ResNet50", "v2", "prod") == "resnet50_v2_prod"
+    assert kg_ingestion._slugify("My Model!!", "1.0") == "my_model_1_0"
