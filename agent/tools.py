@@ -66,6 +66,73 @@ def _trigger_airflow_dag(pipeline_name: str, parameters: dict = None) -> str:
         )
 
 
+def _get_airflow_dag_run_status(dag_id: str, dag_run_id: str) -> str:
+    """
+    Polls the Airflow REST API for the status of a specific DAG run
+    (GET /api/v1/dags/{dag_id}/dagRuns/{dag_run_id}).
+
+    Mirrors `_trigger_airflow_dag`'s env var checks and honest-failure
+    pattern: never fabricates a status if Airflow is unreachable or
+    unconfigured.
+    """
+    base_url = os.getenv("AIRFLOW_BASE_URL")
+    username = os.getenv("AIRFLOW_USERNAME")
+    password = os.getenv("AIRFLOW_PASSWORD")
+
+    if not base_url or not username or not password:
+        logger.warning(
+            f"Pipeline status requested for '{dag_id}' run '{dag_run_id}' but "
+            f"AIRFLOW_BASE_URL/AIRFLOW_USERNAME/AIRFLOW_PASSWORD are not configured."
+        )
+        return (
+            f"Pipeline status NOT available for '{dag_id}' run '{dag_run_id}': "
+            f"Airflow is not configured in this deployment (missing "
+            f"AIRFLOW_BASE_URL/AIRFLOW_USERNAME/AIRFLOW_PASSWORD)."
+        )
+
+    url = f"{base_url.rstrip('/')}/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}"
+
+    try:
+        resp = requests.get(url, auth=(username, password), timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        state = data.get("state", "unknown")
+        start_date = data.get("start_date", "unknown")
+        end_date = data.get("end_date", "unknown")
+        logger.info(f"Pipeline '{dag_id}' run '{dag_run_id}' status: {state}")
+        return (
+            f"Pipeline '{dag_id}' run '{dag_run_id}' is '{state}'. "
+            f"Started: {start_date}. Ended: {end_date}."
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch status for '{dag_id}' run '{dag_run_id}': {e}")
+        return (
+            f"Pipeline status check FAILED for '{dag_id}' run '{dag_run_id}': "
+            f"could not reach the Airflow API ({str(e)})."
+        )
+
+
+@tool
+def get_pipeline_status(pipeline_name: str, dag_run_id: str):
+    """
+    Checks the status of a specific Airflow DAG run via the Airflow REST API.
+
+    Args:
+        pipeline_name (str): The DAG ID (e.g. 'enhanced_ml_pipeline' or
+            'news_data_pipeline'), the same value passed to
+            `trigger_ml_pipeline`/`trigger_news_data_pipeline`.
+        dag_run_id (str): The execution ID returned when the pipeline was
+            triggered (e.g. 'manual__2026-09-27T...').
+
+    Returns:
+        str: The DAG run's state (queued/running/success/failed) and
+        start/end times, or an explicit message stating the status could
+        not be retrieved (Airflow not configured or unreachable). This
+        never fabricates a status.
+    """
+    return _get_airflow_dag_run_status(pipeline_name, dag_run_id)
+
+
 @tool
 def trigger_ml_pipeline(pipeline_name: str = "enhanced_ml_pipeline", parameters: dict = None):
     """

@@ -81,6 +81,56 @@ def test_check_system_health_never_fabricates_simulated_ok(monkeypatch):
     assert "Simulated" not in result
 
 
+# ── #11: get_pipeline_status ────────────────────────────────────────────────
+
+def test_get_pipeline_status_not_configured(monkeypatch):
+    """When Airflow env vars are missing, status check says so honestly
+    instead of fabricating a state."""
+    monkeypatch.delenv("AIRFLOW_BASE_URL", raising=False)
+    monkeypatch.delenv("AIRFLOW_USERNAME", raising=False)
+    monkeypatch.delenv("AIRFLOW_PASSWORD", raising=False)
+
+    result = tools._get_airflow_dag_run_status("enhanced_ml_pipeline", "manual__123")
+    assert "NOT available" in result
+    assert "not configured" in result
+
+
+def test_get_pipeline_status_unreachable(monkeypatch):
+    monkeypatch.setenv("AIRFLOW_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("AIRFLOW_USERNAME", "admin")
+    monkeypatch.setenv("AIRFLOW_PASSWORD", "admin")
+
+    with patch("agent.tools.requests.get", side_effect=ConnectionError("refused")):
+        result = tools._get_airflow_dag_run_status("enhanced_ml_pipeline", "manual__123")
+
+    assert "FAILED" in result
+    assert "manual__123" in result
+
+
+def test_get_pipeline_status_success(monkeypatch):
+    monkeypatch.setenv("AIRFLOW_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("AIRFLOW_USERNAME", "admin")
+    monkeypatch.setenv("AIRFLOW_PASSWORD", "admin")
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "state": "success",
+        "start_date": "2026-09-27T00:00:00Z",
+        "end_date": "2026-09-27T00:05:00Z",
+    }
+
+    with patch("agent.tools.requests.get", return_value=mock_resp) as mock_get:
+        result = tools.get_pipeline_status.invoke(
+            {"pipeline_name": "enhanced_ml_pipeline", "dag_run_id": "manual__123"}
+        )
+
+    called_url = mock_get.call_args.args[0]
+    assert called_url.endswith("/api/v1/dags/enhanced_ml_pipeline/dagRuns/manual__123")
+    assert "success" in result
+    assert "2026-09-27T00:00:00Z" in result
+
+
 # ── #13: record_deployment tool ─────────────────────────────────────────────
 
 def test_record_deployment_tool_success(monkeypatch):
