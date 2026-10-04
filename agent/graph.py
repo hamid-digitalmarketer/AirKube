@@ -13,10 +13,13 @@ from agent.state import AgentState
 from agent.tools import (
     trigger_ml_pipeline,
     trigger_news_data_pipeline,
+    get_pipeline_status,
     query_knowledge_graph,
+    record_deployment,
     check_system_health,
     get_kg_schema,
 )
+from agent.checkpointer import get_checkpointer
 
 logger = logging.getLogger("agent_graph")
 
@@ -41,16 +44,20 @@ Example queries:
 - Full pipeline trace:  MATCH (d)-[:SERVES]->(m)-[:PRODUCED_BY]->(r)-[:BELONGS_TO]->(e) RETURN d.name,m.name,r.name,e.name
 
 ## Guidelines
-1. Always use `query_knowledge_graph` with correct Cypher when asked about models, runs, experiments, or deployments.
+1. Always use `query_knowledge_graph` with correct Cypher when asked about models, runs, experiments, or deployments. This tool is strictly read-only.
 2. Use `check_system_health` to verify API and component status.
 3. Use `trigger_ml_pipeline` or `trigger_news_data_pipeline` to start pipelines.
-4. Be concise. Show results clearly.
+4. After triggering a pipeline, offer to check its status with `get_pipeline_status` using the pipeline name and the execution ID the trigger returned.
+5. Use `record_deployment` to record that a model has been deployed - it is the only sanctioned write path into the Knowledge Graph. Never attempt a CREATE/MERGE/DELETE via `query_knowledge_graph`.
+6. Be concise. Show results clearly.
 """
 
 tools = [
     trigger_ml_pipeline,
     trigger_news_data_pipeline,
+    get_pipeline_status,
     query_knowledge_graph,
+    record_deployment,
     check_system_health,
     get_kg_schema,
 ]
@@ -68,9 +75,18 @@ llm = ChatOpenAI(
 
 llm_with_tools = llm.bind_tools(tools)
 
+# Cap how many recent messages from the (now checkpointer-persisted, #12)
+# conversation are sent to the LLM on each turn, so per-turn token cost
+# stays bounded even as a thread's full history grows across restarts.
+# Callers (dashboard.py, run_agent.py) should rely on the checkpointer to
+# retain full history and only pass the new message(s) for this turn into
+# `app.invoke`/`app.stream` - this is where the sliding window is applied.
+MAX_HISTORY_MESSAGES = 15
+
 
 def call_model(state: AgentState):
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(state["messages"])
+    recent_messages = list(state["messages"])[-MAX_HISTORY_MESSAGES:]
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + recent_messages
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
@@ -91,4 +107,4 @@ workflow.set_entry_point("agent")
 workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
 workflow.add_edge("tools", "agent")
 
-app = workflow.compile()
+app = workflow.compile(checkpointer=get_checkpointer())

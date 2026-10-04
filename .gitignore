@@ -8,6 +8,9 @@ venv/
 .claude/
 logs/
 
+# LangGraph checkpointer sqlite db (agent conversation state, #12)
+data/checkpoints.sqlite
+
 # Terraform generated state and local cache
 .terraform/
 *.tfstate

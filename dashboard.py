@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import logging
+import uuid
 from ml.env import load_env
 
 load_env()
@@ -43,12 +44,11 @@ def _openrouter_key_valid(key: str) -> bool:
         logger.exception("OpenRouter key check failed")
         return False
 
-# Cap how many recent chat messages are sent to the LLM on each turn. The
-# system prompt stays fixed/unbounded-free; only the conversational history
-# is sliding-window truncated so token cost/context usage don't grow
-# unbounded across a long session. Full history is still kept in
-# st.session_state.messages for display purposes.
-MAX_HISTORY_MESSAGES = 15
+# NOTE: the LLM-facing sliding-window truncation (previously done here) now
+# lives in agent/graph.py's `call_model` (MAX_HISTORY_MESSAGES), since the
+# agent's full conversation history is persisted server-side by a LangGraph
+# checkpointer keyed by thread_id (#12) and this dashboard only needs to
+# send the new message(s) for the current turn.
 
 st.set_page_config(
     page_title="AirKube · MLOps Platform",
@@ -207,6 +207,14 @@ button[kind="primary"] {
 """, unsafe_allow_html=True)
 
 # ── Session state ──────────────────────────────────────────────────────────────
+# thread_id identifies this conversation to the LangGraph checkpointer
+# (#12). It's mirrored into the URL query string so a real browser reload
+# (not just a Streamlit rerun) can still recover the same persisted thread
+# instead of silently starting a new, empty one.
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = st.query_params.get("thread") or str(uuid.uuid4())
+st.query_params["thread"] = st.session_state.thread_id
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "pending_input" not in st.session_state:
@@ -264,6 +272,11 @@ with st.sidebar:
         st.divider()
         if st.button("🗑️  Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            # Start a fresh checkpointer thread too, otherwise the next
+            # turn would still load the "cleared" history back from
+            # persisted state even though it's no longer displayed.
+            st.session_state.thread_id = str(uuid.uuid4())
+            st.query_params["thread"] = st.session_state.thread_id
             st.rerun()
 
 # ── Hero ───────────────────────────────────────────────────────────────────────
@@ -283,6 +296,22 @@ st.markdown("""
 
 # ── Lazy imports ───────────────────────────────────────────────────────────────
 from agent.graph import app
+
+_agent_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+# On a fresh Streamlit session (e.g. after a real browser reload restored
+# the same `?thread=` id, or a new server process after a restart), the
+# local session_state.messages list starts empty even though the
+# checkpointer (#12) may already hold this thread's history - restore it
+# so the displayed chat survives the reload, not just the agent's context.
+if not st.session_state.messages:
+    try:
+        _persisted = app.get_state(_agent_config)
+        _persisted_messages = (_persisted.values or {}).get("messages", [])
+        if _persisted_messages:
+            st.session_state.messages = list(_persisted_messages)
+    except Exception:
+        logger.exception("Failed to restore persisted conversation state")
 
 # ── Views ──────────────────────────────────────────────────────────────────────
 if view == "💬  Chat":
@@ -326,13 +355,17 @@ if view == "💬  Chat":
 
         with st.chat_message("assistant", avatar="✈️"):
             with st.spinner("Thinking…"):
-                # Sliding-window truncation: only send the most recent N messages
-                # to the agent, not the entire unbounded session history, to keep
-                # per-turn token cost/context usage bounded on long sessions.
-                recent_messages = st.session_state.messages[-MAX_HISTORY_MESSAGES:]
+                # Only the new message is sent as input - the checkpointer
+                # (#12) already holds this thread's prior history server-side
+                # and `agent/graph.py`'s call_model applies its own sliding
+                # window before calling the LLM, so we don't resend/duplicate
+                # history here.
                 with tracer.trace("dashboard.agent_invoke", service="airkube-dashboard"):
                     try:
-                        final_state = app.invoke({"messages": recent_messages})
+                        final_state = app.invoke(
+                            {"messages": [HumanMessage(content=user_input)]},
+                            config=_agent_config,
+                        )
                     except Exception:
                         logger.exception("Agent invocation failed")
                         final_state = None

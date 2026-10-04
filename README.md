@@ -188,7 +188,8 @@ python run_agent.py
 | `NEO4J_USER` | No | Neo4j username |
 | `NEO4J_PASSWORD` | No | Neo4j password |
 | `AIRFLOW_BASE_URL` | For pipeline triggers | Airflow REST API base URL, e.g. `http://localhost:8080` |
-| `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` | For pipeline triggers | Airflow basic-auth credentials. Without all three Airflow vars, the agent's `trigger_ml_pipeline`/`trigger_news_data_pipeline` tools say so explicitly instead of pretending a DAG run started |
+| `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` | For pipeline triggers | Airflow basic-auth credentials. Without all three Airflow vars, the agent's `trigger_ml_pipeline`/`trigger_news_data_pipeline`/`get_pipeline_status` tools say so explicitly instead of pretending a DAG run started or finished |
+| `AIRKUBE_CHECKPOINT_DB` | No | Path to the SQLite database used by the LangGraph checkpointer to persist agent conversation state across restarts (default: `data/checkpoints.sqlite`). Set to `:memory:` to disable persistence and use an in-process-only checkpointer instead |
 | `NEWS_API_KEY` | For news pipeline | NewsAPI.org key |
 | `GCP_PROJECT_ID` | For news pipeline | GCP project ID |
 | `NEWS_GCS_BUCKET` | Optional | GCS bucket for raw news data |
