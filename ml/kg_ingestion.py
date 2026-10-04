@@ -8,6 +8,17 @@ logger = logging.getLogger("kg_ingestion")
 ALLOWED_REL_TYPES = frozenset({"BELONGS_TO", "PRODUCED_BY", "SERVES"})
 _REL_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
+# Expected (source label, target label) for each allowed relationship type.
+# Entity.id is only unique per-type (see ml/kg_schemas.py), not across all
+# node types, so the MATCH for a relationship must be scoped by label on
+# both sides - otherwise an id collision between e.g. a Model and a
+# Deployment can splice an edge onto the wrong node (#16).
+REL_TYPE_LABELS = {
+    "BELONGS_TO": ("Run", "Experiment"),
+    "PRODUCED_BY": ("Model", "Run"),
+    "SERVES": ("Deployment", "Model"),
+}
+
 
 def safe_rel_type(rel_type):
     """Return a backtick-escaped relationship type, or raise ValueError.
@@ -93,8 +104,17 @@ def ingest_graph(extraction: ExtractionResult, model_version: str = "unknown"):
         except ValueError:
             logger.warning("Skipping relationship with invalid type: %r", rel.type)
             continue
+
+        # rel.type is validated against ALLOWED_REL_TYPES above, so it must
+        # be present in REL_TYPE_LABELS too - but guard defensively anyway.
+        labels = REL_TYPE_LABELS.get(rel.type)
+        if labels is None:
+            logger.warning("No label mapping for relationship type: %r", rel.type)
+            continue
+        src_label, tgt_label = labels
+
         query = f"""
-        MATCH (s {{id: $source_id}}), (t {{id: $target_id}})
+        MATCH (s:{src_label} {{id: $source_id}}), (t:{tgt_label} {{id: $target_id}})
         MERGE (s)-[r:{rel_type}]->(t)
         SET r += $props,
             r.ingested_at = datetime()
