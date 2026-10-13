@@ -44,6 +44,30 @@ def _openrouter_key_valid(key: str) -> bool:
         logger.exception("OpenRouter key check failed")
         return False
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _newsapi_key_valid(key: str) -> bool:
+    """
+    Validate the NewsAPI key against NewsAPI's own lightweight
+    `/v2/top-headlines/sources` endpoint (#21), mirroring
+    `_openrouter_key_valid`/`_neo4j_reachable`: the sidebar previously
+    reported NewsAPI as "connected" purely from env-var presence, without
+    ever checking whether the key actually works. `top-headlines/sources`
+    returns metadata only (no articles), so it's cheap against NewsAPI's
+    request quota compared to an actual articles query.
+    """
+    try:
+        import requests
+        r = requests.get(
+            "https://newsapi.org/v2/top-headlines/sources",
+            params={"apiKey": key},
+            timeout=5,
+        )
+        return r.status_code == 200
+    except Exception:
+        logger.exception("NewsAPI key check failed")
+        return False
+
 # NOTE: the LLM-facing sliding-window truncation (previously done here) now
 # lives in agent/graph.py's `call_model` (MAX_HISTORY_MESSAGES), since the
 # agent's full conversation history is persisted server-side by a LangGraph
@@ -251,8 +275,12 @@ with st.sidebar:
     st.markdown(
         f"{'🟢' if neo4j_ok else '🔴'} Neo4j {'connected' if neo4j_ok else 'unreachable' if neo4j_uri else 'not configured'}"
     )
-    news_ok = bool(os.getenv("NEWS_API_KEY"))
-    st.markdown(f"{'🟢' if news_ok else '🟡'} NewsAPI {'connected' if news_ok else 'not set'}")
+    news_key = os.getenv("NEWS_API_KEY", "")
+    news_ok = _newsapi_key_valid(news_key) if news_key else False
+    st.markdown(
+        f"{'🟢' if news_ok else '🔴' if news_key else '🟡'} "
+        f"NewsAPI {'connected' if news_ok else 'invalid key' if news_key else 'not set'}"
+    )
 
     st.divider()
     st.markdown('<div class="section-label" style="color:#475569!important;padding:0 4px">System Health</div>', unsafe_allow_html=True)
