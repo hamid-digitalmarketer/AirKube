@@ -31,11 +31,17 @@ def _print_stream_event(event):
 async def _run_turn(new_messages, config):
     console.print("[dim]Agent is thinking...[/dim]")
 
+    # Run the graph exactly once per turn via astream_events (#17) - a
+    # second ainvoke() here would re-run the whole graph (including any
+    # tool calls) a second time, duplicating side effects like pipeline
+    # triggers. The checkpointer (#12) persists state after the stream
+    # completes, so we read the final messages back from there instead of
+    # invoking again.
     async for event in app.astream_events({"messages": new_messages}, version="v1", config=config):
         _print_stream_event(event)
 
-    final_state = await app.ainvoke({"messages": new_messages}, config=config)
-    return final_state["messages"]
+    final_state = await app.aget_state(config)
+    return final_state.values["messages"]
 
 def _resolve_thread_id():
     """
