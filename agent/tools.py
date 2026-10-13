@@ -260,15 +260,24 @@ def check_system_health():
     except Exception as e:
         health_status.append(f"[ERR] Inference API: Unreachable ({str(e)})")
 
-    # 2. Check Database (Simulated via Connector)
-    # real check would be trying a simple query
+    # 2. Check Database - actually attempt a connection (#18) rather than
+    # just confirming the driver object was constructed, which previously
+    # reported [OK] even when Neo4j was completely unreachable.
+    connector = None
     try:
         connector = get_connector()
-        # Just check if we can get a connector object without error, actual connection check happens on query
-        health_status.append("[OK] Knowledge Graph Connector: Initialized")
-        connector.close()
-    except Exception:
-        health_status.append("[ERR] Knowledge Graph Connector: Failed")
+        if not connector.driver:
+            health_status.append(
+                "[ERR] Knowledge Graph Connector: Not configured (no driver)"
+            )
+        else:
+            connector.driver.verify_connectivity()
+            health_status.append("[OK] Knowledge Graph Connector: Reachable")
+    except Exception as e:
+        health_status.append(f"[ERR] Knowledge Graph Connector: Unreachable ({str(e)})")
+    finally:
+        if connector:
+            connector.close()
 
     # 3. Check Airflow
     health_status.append(_check_airflow_health())
