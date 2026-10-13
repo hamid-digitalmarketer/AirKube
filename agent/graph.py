@@ -4,7 +4,7 @@ from ml.env import load_env
 
 load_env()
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -84,8 +84,32 @@ llm_with_tools = llm.bind_tools(tools)
 MAX_HISTORY_MESSAGES = 15
 
 
+def _safe_history_slice(messages, max_messages):
+    """
+    Slices to the last `max_messages` messages without splitting an
+    AIMessage(tool_calls=...) from its paired ToolMessage(s) (#19).
+
+    A naive `[-max_messages:]` slice can start the window right in the
+    middle of a tool-call/tool-response pair - e.g. keeping the
+    ToolMessage but cutting off the preceding AIMessage that issued the
+    tool_calls it responds to. OpenAI-compatible APIs (including
+    OpenRouter) reject that shape, since every `tool` message must be
+    immediately preceded in context by the assistant message that
+    requested it. Walk the boundary back past any leading ToolMessage(s)
+    so the window always starts on a safe boundary.
+    """
+    messages = list(messages)
+    if len(messages) <= max_messages:
+        return messages
+
+    start = len(messages) - max_messages
+    while start > 0 and isinstance(messages[start], ToolMessage):
+        start -= 1
+    return messages[start:]
+
+
 def call_model(state: AgentState):
-    recent_messages = list(state["messages"])[-MAX_HISTORY_MESSAGES:]
+    recent_messages = _safe_history_slice(state["messages"], MAX_HISTORY_MESSAGES)
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + recent_messages
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
